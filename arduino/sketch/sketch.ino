@@ -1,5 +1,5 @@
 /*
-2024/10/09
+2024/10/09-10
 1) 통신 배선 및 코드 수정
 Serial  : PC
 Serial1 : RS485 to TTL (modbus: 릴레이, 토양 센서)
@@ -8,15 +8,18 @@ Serial3 : TTL (PC)
 
 2) 센서 사용/미사용 수동 명령어 추가 (l, s, w)
 3) LED 작동 로직 수정, 오작동 확인 기능 추가
-4) 토양 센서 NPK값 부정확하여 사용하지 않음
+4) 토양 센서 NPK, 습도값 부정확하여 사용하지 않음
+
+... 라이브러리 업데이트, 센서 측정 간격 변경 (30분)
 
 남은 과제:
-1) LED 릴레이 배선 (+ 릴레이 slave ID 변경)
-2) 팬(타이머 콘센트) 가동
-3) 구동계 작동 알고리즘 변경 (flag 및 배액율 기준 작동 시간 변경)
+1) LED 릴레이 배선 (+ 릴레이 slave ID 변경) >> 선풍기(타이머 콘센트) 가동
+2) 구동계 작동 알고리즘 변경 (flag 및 배액율 기준 작동 시간 변경)
+3) 로드셀 설치 및 배액율 관리 코드 작성
 ... Node-Red 프로토타입 / MQTT 통신 기능 / 데이터 저장 부분 연동
 */
 
+#include "credential.h"
 #include <Wire.h>                  
 #include <BH1750.h>
 #include <DS3231.h>
@@ -35,7 +38,7 @@ Serial3 : TTL (PC)
   // bool error = false;
   bool relayState[8];
   bool pumpFlag = false;               // current pump state goal: (default: false)
-  bool ledFlag = false;                // current LED state goal: (default: false)
+  bool ledFlag = true;                 // current LED state goal: (default: true)
   uint16_t air_sensor_values[2];
   uint16_t soil_sensor_values[8];
   uint16_t water_sensor_values[4];
@@ -60,13 +63,13 @@ Serial3 : TTL (PC)
 
   // objects, timing
   ModbusRTUMaster modbus(Serial1);           // RS485 MODBUS RTU
-  // LiquidCrystal_I2C lcd(lcdAddress, 16, 2);  // i2c (sda 20, scl 21)
   BH1750 lightMeter;                         // i2c (sda 20, scl 21)
+  // LiquidCrystal_I2C lcd(lcdAddress, 16, 2);  // i2c (sda 20, scl 21)
 
   unsigned long millisPrevShort = 0
   unsigned long millisPrevLong = 0;
   unsigned long intervalShort = 1000;        // actuator
-  unsigned long intervalLong = 3000;         // sensor values, actuator status report 
+  unsigned long intervalLong = 180000;       // sensor values, actuator status report 
 
 
 
@@ -137,7 +140,7 @@ void loop() {
     // Sensor();
   }
 
-  // long-term actions (3s)
+  // long-term actions (30m)
   if (currentMillis - millisPrevLong >= intervalLong) {
     millisPrevLong = currentMillis; 
 
