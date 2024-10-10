@@ -1,83 +1,156 @@
 /*
   ModbusRTUMasterExample
-  
-  This example demonstrates how to setup and use the ModbusRTUMaster library.
-  It is intended to be used with a second board running ModbusRTUSlaveExample from the ModbusRTUSlave library.  
-  
-  Circuit:
-  - A pushbutton switch from pin 2 to GND
-  - A pushbutton switch from pin 3 to GND
-  - A LED from pin 5 to GND with a 330 ohm series resistor
-  - A LED from pin 6 to GND with a 330 ohm series resistor
-  - A LED from pin 7 to GND with a 330 ohm series resistor
-  - A LED from pin 8 to GND with a 330 ohm series resistor
-  - The center pin of a potentiometer to pin A0, and the outside pins of the potentiometer to 5V and GND
-  - The center pin of a potentiometer to pin A1, and the outside pins of the potentiometer to 5V and GND
-  
-  !!! If your board's logic voltage is 3.3V, use 3.3V instead of 5V; if in doubt use the IOREF pin !!!
-  
-  - pin 10 to pin 11 of the slave/server board
-  - pin 11 to pin 10 of the slave/server board
-  - GND to GND of the slave/server board
-  
-  A schematic and illustration of the circuit is in the extras folder of the ModbusRTUMaster library.
-
-  - Pin 13 is set up as the driver enable pin. This pin will be HIGH whenever the board is transmitting.
+ 
+  This example demonstrates how to setup and use the ModbusRTUMaster library (https://github.com/CMB27/ModbusRTUMaster).
+  See README.md (https://github.com/CMB27/ModbusRTUMaster/blob/main/examples/ModbusRTUMasterExample/README.md) for hardware setup details.
   
   Created: 2023-07-22
   By: C. M. Bulliner
-  Modified: 2023-07-29
-  By: C. M. Bulliner
-  Modified: 2023-11-11
+  Last Modified: 2024-09-07
   By: C. M. Bulliner
   
 */
 
-#include <SoftwareSerial.h>
 #include <ModbusRTUMaster.h>
 
-const uint8_t ledPins[4] = {8, 7, 6, 5};
-const uint8_t buttonPins[2] = {3, 2};
-const uint8_t potPins[2] = {A0, A1};
+#if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
+  // The ATmega328P and ATmega168 only have one HardwareSerial port, and on Arduino boards it is usually connected to a USB/UART bridge.
+  // So, for these boards, we will use SoftwareSerial with the lbrary, leaving the HardwareSerial port available to send debugging messages.
+  #define SOFTWARE_SERIAL
+  #include <SoftwareSerial.h>
+  const int8_t rxPin = 10;
+  const int8_t txPin = 11;
+  SoftwareSerial mySerial(rxPin, txPin);
+  #define MODBUS_SERIAL mySerial
+#elif defined(ARDUINO_NANO_ESP32)
+  // On the Arduino Nano ESP32, the HardwareSerial port on pins 0 and 1 is Serial0
+  #define MODBUS_SERIAL Serial0
+#else
+  // On the majority of Arduino boards, the HardwareSerial port on pins 0 and 1 is Serial1
+  // On the Arduino Mega and Adruino Due, Serial1 is on pins 18 and 19.
+  #define MODBUS_SERIAL Serial1
+#endif
 
-const uint8_t rxPin = 10;
-const uint8_t txPin = 11;
-const uint8_t dePin = 13;
+#if (defined(ARDUINO_NANO_RP2040_CONNECT) && !defined(ARDUINO_ARCH_MBED)) || defined(ARDUINO_NANO_ESP32)
+  // These boards operate unsing GPIO numbers that don't correspond to the numbers on the boards.
+  // However they do have D# values #defined to correct this.
+  const int8_t buttonPins[2] = {D2, D3};
+  const int8_t ledPins[4] = {D5, D6, D7, D8};
+  const int8_t dePin = D13;
+#else
+  // Other boards do not have D# values, and will throw an error if you try to use them.
+  const int8_t buttonPins[2] = {2, 3};
+  const int8_t ledPins[4] = {5, 6, 7, 8};
+  const int8_t dePin = 13;
+#endif
+const int8_t knobPins[2] = {A0, A1};
 
-SoftwareSerial mySerial(rxPin, txPin);
-ModbusRTUMaster modbus(mySerial, dePin); // serial port, driver enable pin for rs-485 (optional)
+ModbusRTUMaster modbus(MODBUS_SERIAL, dePin);
 
-bool coils[2];
-bool discreteInputs[2];
-uint16_t holdingRegisters[2];
-uint16_t inputRegisters[2];
+const uint8_t numCoils = 2;
+const uint8_t numDiscreteInputs = 2;
+const uint8_t numHoldingRegisters = 2;
+const uint8_t numInputRegisters = 2;
+
+bool coils[numCoils];
+bool discreteInputs[numDiscreteInputs];
+uint16_t holdingRegisters[numHoldingRegisters];
+uint16_t inputRegisters[numInputRegisters];
+
+unsigned long transactionCounter = 0;
+unsigned long errorCounter = 0;
+
+const char* errorStrings[] = {
+  "success",
+  "invalid id",
+  "invalid buffer",
+  "invalid quantity",
+  "response timeout",
+  "frame error",
+  "crc error",
+  "unknown comm error",
+  "unexpected id",
+  "exception response",
+  "unexpected function code",
+  "unexpected response length",
+  "unexpected byte count",
+  "unexpected address",
+  "unexpected value",
+  "unexpected quantity"
+};
+
+
+
+void printLog(uint8_t unitId, uint8_t functionCode, uint16_t startingAddress, uint16_t quantity, uint8_t error) {
+  transactionCounter++;
+  if (error) errorCounter++;
+  char string[128];
+  sprintf(string, "%ld %ld %02X %02X %04X %04X %s", transactionCounter, errorCounter, unitId, functionCode, startingAddress, quantity, errorStrings[error]);
+  Serial.print(string);
+  if (error == MODBUS_RTU_MASTER_EXCEPTION_RESPONSE) {
+    sprintf(string, ": %02X", modbus.getExceptionResponse());
+    Serial.print(string);
+  }
+  Serial.println();
+}
+
+
 
 void setup() {
+  pinMode(knobPins[0], INPUT);
+  pinMode(knobPins[1], INPUT);
+  pinMode(buttonPins[0], INPUT_PULLUP);
+  pinMode(buttonPins[1], INPUT_PULLUP);
   pinMode(ledPins[0], OUTPUT);
   pinMode(ledPins[1], OUTPUT);
   pinMode(ledPins[2], OUTPUT);
   pinMode(ledPins[3], OUTPUT);
-  pinMode(buttonPins[0], INPUT_PULLUP);
-  pinMode(buttonPins[1], INPUT_PULLUP);
-  pinMode(potPins[0], INPUT);
-  pinMode(potPins[1], INPUT);
+
+  #if defined(ARDUINO_NANO_ESP32)
+    analogReadResolution(10);
+  #endif
   
-  modbus.begin(38400); // baud rate, config (optional)
+  Serial.begin(115200);
+
+  // You can change the baud and config values if you like.
+  // Just make sure they match the settings you use in ModbusRTUSlaveExample.
+  // Note, the config value will be ignored when using SoftwareSerial.
+  // SoftwareSerial only supports SERIAL_8N1.
+  unsigned long baud = 38400;
+  #ifndef SOFTWARE_SERIAL
+    uint32_t config = SERIAL_8N1;
+    MODBUS_SERIAL.begin(baud, config);
+    modbus.begin(baud, config);
+  #else
+    MODBUS_SERIAL.begin(baud);
+    modbus.begin(baud);
+  #endif
 }
 
 void loop() {
+  holdingRegisters[0] = map(analogRead(knobPins[0]), 0, 1023, 0, 255);
+  holdingRegisters[1] = map(analogRead(knobPins[1]), 0, 1023, 0, 255);
   coils[0] = !digitalRead(buttonPins[0]);
   coils[1] = !digitalRead(buttonPins[1]);
-  holdingRegisters[0] = map(analogRead(potPins[0]), 0, 1023, 0, 255);
-  holdingRegisters[1] = map(analogRead(potPins[1]), 0, 1023, 0, 255);
+
+  uint8_t unitId = 1;
+  uint16_t startingAddress[4] = {0, 0, 0, 0};
+  uint8_t error;
+
+  error = modbus.writeMultipleHoldingRegisters(unitId, startingAddress[0], holdingRegisters, numHoldingRegisters);
+  printLog(unitId, 16, startingAddress[0], numHoldingRegisters, error);
+
+  error = modbus.writeMultipleCoils(unitId, startingAddress[1], coils, numCoils);
+  printLog(unitId, 15, startingAddress[1], numHoldingRegisters, error);
+
+  error = modbus.readInputRegisters(unitId, startingAddress[2], inputRegisters, numInputRegisters);
+  printLog(unitId, 4, startingAddress[2], numHoldingRegisters, error);
+
+  error = modbus.readDiscreteInputs(unitId, startingAddress[3], discreteInputs, numDiscreteInputs);
+  printLog(unitId, 2, startingAddress[3], numHoldingRegisters, error);
   
-  modbus.writeMultipleCoils(1, 0, coils, 2);                       // slave id, starting data address, bool array of coil values, number of coils to write
-  modbus.writeMultipleHoldingRegisters(1, 0, holdingRegisters, 2); // slave id, starting data address, unsigned 16 bit integer array of holding register values, number of holding registers to write
-  modbus.readDiscreteInputs(1, 0, discreteInputs, 2);              // slave id, starting data address, bool array to place discrete input values, number of discrete inputs to read
-  modbus.readInputRegisters(1, 0, inputRegisters, 2);              // slave id, starting data address, unsigned 16 bit integer array to place input register values, number of input registers to read
-  
-  digitalWrite(ledPins[0], discreteInputs[0]);
-  digitalWrite(ledPins[1], discreteInputs[1]);
-  analogWrite(ledPins[2], inputRegisters[0]);
-  analogWrite(ledPins[3], inputRegisters[1]);
+  analogWrite(ledPins[0], inputRegisters[0]);
+  analogWrite(ledPins[1], inputRegisters[1]);
+  digitalWrite(ledPins[2], discreteInputs[0]);
+  digitalWrite(ledPins[3], discreteInputs[1]);
 }
