@@ -1,154 +1,150 @@
-/*
-2024/10/09-10
-1) 통신 배선 및 코드 수정
-Serial  : PC
-Serial1 : RS485 to TTL (modbus: 릴레이, 토양 센서)
-Serial2 : RS485 to TTL (급액, 배액 센서) (공기 온습도 센서는 센서값 오류, 통신 방해로 제외함)
-Serial3 : TTL (PC)
-
-2) 센서 사용/미사용 수동 명령어 추가 (l, s, w)
-3) LED 작동 로직 수정, 오작동 확인 기능 추가
-4) 토양 센서 NPK, 습도값 부정확하여 사용하지 않음
-
-... 라이브러리 업데이트, 센서 측정 간격 변경 (30분)
-
-남은 과제:
-1) LED 릴레이 배선 (+ 릴레이 slave ID 변경) >> 선풍기(타이머 콘센트) 가동
-2) 구동계 작동 알고리즘 변경 (flag 및 배액율 기준 작동 시간 변경)
-3) 로드셀 설치 및 배액율 관리 코드 작성
-... Node-Red 프로토타입 / MQTT 통신 기능 / 데이터 저장 부분 연동
-*/
-
-#include "credential.h"
+#include "credential.h"   // (#define device_mac *YOUR_MAC_ADDRESS)
 #include <Wire.h>                  
 #include <BH1750.h>
 #include <DS3231.h>
-#include <Ethernet.h>                
-#include <ModbusRTUMaster.h>             
-#include <LiquidCrystal_I2C.h>     
+#include <Ethernet.h>
+#include <PubSubClient.h>
+#include <ModbusRTUMaster.h>    
 
-  // modbus slave IDs (uint8_t), register address (uint16_t)
-  uint8_t relayID = 1;                 // 0x00~0x07 (0:pump, 5:side led)
-  uint8_t soilSensorID = 7;            // 0x00~0x08 (0-6 in use)
-  // uint8_t waterSensorAID = 4;          // waste water
-  // uint8_t waterSensorBID = 5;          // nutrient solution 
-  // uint8_t airSensorID = 2;             // 0x01~0x02 (in repair)
 
-  // buffers (array of uint16_t)
-  // bool error = false;
-  bool relayState[8];
-  bool pumpFlag = false;               // current pump state goal: (default: false)
-  bool ledFlag = true;                 // current LED state goal: (default: true)
-  uint16_t air_sensor_values[2];
-  uint16_t soil_sensor_values[8];
-  uint16_t water_sensor_values[4];
-
-  // I2C slave address (byte)
-  byte rtcAddress = 0x68;
-  byte luxAddress = 0x23;
-  byte lcdAddress = 0x27;
-
-  // Ethernet Setting (mac address: credential)
+//// Ethernet Setting (mac address in credential.h)
+  byte mac[] = {device_mac};
   int ethernetCSPin = 53;
-  byte mac[] = {credential_mac};
+  EthernetClient ethClient;
 
-  // RTC(DS3231) Setting 
+
+//// MQTT settings 
+  bool mqtt_flag = false;  // current MQTT action goal: (default: false)
+
+  const char mqtt_server[] = "test.mosquitto.org";
+  const char from_farm_a[] = "farmease/actuator";
+  const char from_farm_s[] = "farmease/sensor";
+  const char to_farm[] = "farmease/command";
+  
+  void callback(char* topic, byte* payload, unsigned int length);
+  PubSubClient client(mqtt_server, 1883, callback, ethClient);
+
+  char publish_payload[100];
+
+  volatile int mqtt_time[3] = { 10, 30, 50 };
+
+
+//// modbus settings
+  ModbusRTUMaster modbus(Serial1);
+
+
+//// relay settings
+  bool relay_state[8];
+  bool led_flag = true;       // current LED action goal: (default: true)
+  bool pump_flag = false;     // current pump action goal: (default: false)
+
+  uint8_t relay_ID = 1;       // 0x00~0x07 (0:pump, 3: main led, 5:side led)
+
+  volatile int dose = 50;
+  volatile int pump_time[5] = { 7, 17, 0, 1, 30 };   //  from 7:00 to 17:00, for 1 minute
+  volatile int led_time[3] = { 8, 18, 0 };           //  from 8:00 to 18:00
+
+
+//// sensor settings
+  bool sensor_flag = false; // current sensor action goal: (default: false)
+
+  // sensor (de)activation (true = active)
+  bool sense_lux = true;
+  bool sense_soil = true;
+  bool sense_water = true;
+  // bool sense_air = true; (in repair)
+
+  uint8_t soil_sensor_ID = 7;  
+  byte luxAddress = 0x23;
+  BH1750 lightMeter;  // i2c (sda 20, scl 21)
+
+  // temporary buffers
+  uint16_t air_sensor_values[2] = {0};
+  uint16_t soil_sensor_values[8] = {0};
+  uint16_t water_sensor_values[4] = {0};
+
+  // latest measurements
+  float lumi_updated = -1;   // default: -1 (for error checking)
+  float soil_updated[4] = {0};
+  float nutri_updated[3] = {0};
+  float waste_updated[3] = {0};
+  
+  int timeout_count = 0;
+  volatile int sensor_time[3] = { 5, 25, 45 };
+
+
+//// RTC(DS3231) Setting 
   DS3231 myRTC; 
   DateTime now;
   bool pmFlag = false; 
   bool century = false; 
-  bool h12Flag = false;
-  bool rtcSetTime = false;                    // true = set time manually (default: false)
+  bool h12Flag = false;       
+  byte rtcAddress = 0x68;                   
+  
+  // change when setting time manually
+  // (RTC 시간을 수동으로 조정합니다.)
   byte rtcTime[6] = { 24, 9, 12, 18, 5, 0 };  // (yy,m,d,h,m,s)
-
-  // objects, timing
-  ModbusRTUMaster modbus(Serial1);           // RS485 MODBUS RTU
-  BH1750 lightMeter;                         // i2c (sda 20, scl 21)
-  // LiquidCrystal_I2C lcd(lcdAddress, 16, 2);  // i2c (sda 20, scl 21)
-
-  unsigned long millisPrevShort = 0
-  unsigned long millisPrevLong = 0;
-  unsigned long intervalShort = 1000;        // actuator
-  unsigned long intervalLong = 180000;       // sensor values, actuator status report 
+  bool rtcSetTime = false; // true = set time manually (default: false)
+  static int hour, min, sec;
 
 
-
-  // Schedule
-  volatile int pumpTime[4] = { 7, 17, 0, 1 }; //  from 7:00 to 17:00, for 1 minute
-  volatile int ledTime[3] = { 8, 18, 0 };     //  from 8:00 to 18:00
-
-
-  // Report Setting (true = report sensor/setting information)
-  bool senseLux = true;
-  bool senseSoil = true;
-  bool senseWater = true;
-  // bool senseAir = true; (in repair)
-  // bool sensorReport = true;
-  // bool statusReport = true;
+//// millis settings
+  unsigned long millis_short = 0;
+  unsigned long interval_short = 1000;
 
 
-
-void setup() {
+// =====================================================================
+void setup() 
+{
   Serial.begin(9600);    // PC
   Serial1.begin(9600);   // RS485 MODBUS RTU (relay, soil sensor)
   Serial2.begin(9600);   // RS485 to TTL (water1, water2)
-  Serial3.begin(9600);   // TTL (PC2)
+  Serial3.begin(9600);   // TTL (PC)
   modbus.begin(9600);    // MODBUS
   Wire.begin();          // I2C 
   lightMeter.begin();    // I2C 
 
-  // Ethernet (mandatory) 
-  Ethernet.init(ethernetCSPin);  
-  while (!Serial) {  ; } 
-  Serial.println("Initialize Ethernet with DHCP:"); 
-  if (Ethernet.begin(mac) == 0) {
-    Serial.println("Failed to configure Ethernet using DHCP");
-    if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-      Serial.println("Ethernet shield was not found.  Sorry, can't run without hardware. :(");}
-      else if (Ethernet.linkStatus() == LinkOFF)
-       {Serial.println("Ethernet cable is not connected.");}
-    while (true) {delay(1);}
-  }
-  Serial.print("My IP address: ");
-  Serial.println(Ethernet.localIP());
+  ethernet_setup();
+  client.setServer(mqtt_server, 1883);
+  // client.subscribe(to_farm);
 
   setup_rtc(rtcSetTime, rtcTime);
+
+  now = RTClib::now();
+  hour = myRTC.getHour(h12Flag, pmFlag);
+  min = myRTC.getMinute();
+  sec = myRTC.getSecond();
+
+  dose_to_time(dose);
   echo_time();
-  
-  // LCD (no use)
-  // lcd.init();
-  // lcd.clear();
-  // lcd.backlight();
-  // lcd.print(F("Hello!"));
 }
 
 
-void loop() {
-  // time check
-  unsigned long currentMillis = millis();
-  now = RTClib::now();
-  int RTCHour = myRTC.getHour(h12Flag, pmFlag);
-  int RTCMin = myRTC.getMinute();
-  int RTCSec = myRTC.getSecond();
+void loop()
+{
+
+  // MQTT reconnection
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
 
   // short-term actions (1s)
-  if (currentMillis - millisPrevShort >= intervalShort) {
-    millisPrevShort = currentMillis; 
+  unsigned long current_millis = millis();
+  if (current_millis - millis_short >= interval_short) 
+  {
+    millis_short = current_millis; 
 
-    Pump(RTCHour, RTCMin, RTCSec);
-    Light(RTCHour, RTCMin, RTCSec);
-    // Sensor();
+    now = RTClib::now();
+    hour = myRTC.getHour(h12Flag, pmFlag);
+    min = myRTC.getMinute();
+    sec = myRTC.getSecond();
+
+    from_nodered();
+    scheduled_pump(hour, min, sec);
+    scheduled_led(hour, min, sec);
+
+    // scheduled_sensor(hour, min, sec);
+    // scheduled_publish(hour, min, sec);
   }
-
-  // long-term actions (30m)
-  if (currentMillis - millisPrevLong >= intervalLong) {
-    millisPrevLong = currentMillis; 
-
-    Sensor();
-  }
-
-  // halt if error
-  // if (error) {
-  //   while(1){};
-  // }
 }

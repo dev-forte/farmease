@@ -1,6 +1,7 @@
 void setup_rtc(bool rtcSetTime, byte * rtcTime)
 {
-  Wire.beginTransmission(rtcAddress);
+  // uncomment 'Wire' when using multiple i2c devices
+  // Wire.beginTransmission(rtcAddress);
   // to fix time manually
   if (rtcSetTime) {
     myRTC.setClockMode(false);  // 12h(true) 24h(false)
@@ -12,12 +13,12 @@ void setup_rtc(bool rtcSetTime, byte * rtcTime)
     myRTC.setSecond(rtcTime[5]);
     Serial.println(F("MANUAL TIME SETTING DONE"));
   }
-  Wire.endTransmission(rtcAddress);
+  // Wire.endTransmission(rtcAddress);
 }
 
-void echo_time() 
+void echo_time()
 { 
-  Wire.beginTransmission(rtcAddress);
+  // Wire.beginTransmission(rtcAddress);
   now = RTClib::now();
     Serial.print(F("RTC TIME: ")); 
     Serial.print(now.year(), DEC);
@@ -32,5 +33,25 @@ void echo_time()
     Serial.print(':');
     Serial.println(now.second(), DEC);
     Serial.println(F("================="));
-  Wire.endTransmission(rtcAddress);
+  // Wire.endTransmission(rtcAddress);
+}
+
+void echo_time2() 
+{ 
+  // Wire.beginTransmission(rtcAddress);
+  now = RTClib::now();
+    Serial3.print(F("RTC TIME: ")); 
+    Serial3.print(now.year(), DEC);
+    Serial3.print('/');
+    Serial3.print(now.month(), DEC);
+    Serial3.print('/');
+    Serial3.print(now.day(), DEC);
+    Serial3.print(' ');
+    Serial3.print(now.hour(), DEC);
+    Serial3.print(':');
+    Serial3.print(now.minute(), DEC);
+    Serial3.print(':');
+    Serial3.println(now.second(), DEC);
+    Serial3.println(F("================="));
+  // Wire.endTransmission(rtcAddress);
 }
